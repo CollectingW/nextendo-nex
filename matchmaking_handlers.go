@@ -134,6 +134,15 @@ type Matchmaking struct {
 	// data use it to publish on the host's behalf. nil by default, so the titles that
 	// publish themselves are unchanged.
 	OnFriendSessionCreated func(pid uint64, gid uint32)
+	// OnParticipantJoined, when set, is called at the end of notifyParticipation —
+	// once per pid that successfully joins a gathering, whether via autoMatchmake,
+	// createSession's implicit host self-join, or joinSession. Titles whose actual
+	// gameplay traffic doesn't go through this server's own P2P/NAT-traversal path
+	// use it to hand the joiner something else instead, e.g. SMB35 starts (or
+	// reuses) that gathering's Eagle relay session here and pushes the joiner its
+	// wss:// URL + token via a notification event. nil by default, so titles that
+	// don't set it are unchanged.
+	OnParticipantJoined func(gid uint32, pid uint64)
 
 	notif      *notifStore
 	mu         sync.Mutex
@@ -451,6 +460,10 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 	}
 	fmt.Printf("[MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
 		gid, caller.PID, count, count-1, participants)
+
+	if m.OnParticipantJoined != nil {
+		m.OnParticipantJoined(gid, caller.PID)
+	}
 }
 
 // [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to
