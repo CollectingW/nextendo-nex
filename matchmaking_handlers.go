@@ -3,6 +3,7 @@ package nex
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -15,11 +16,16 @@ const (
 
 	// MatchMaking (0x15)
 	MethodUnregisterGathering uint32 = 0x02
-	MethodFindBySingleID15    uint32 = 0x15
-	MethodUpdateSessionURL    uint32 = 0x1B
-	MethodUpdateSessionHostV1 uint32 = 0x28
-	MethodGetSessionURLs      uint32 = 0x29
-	MethodUpdateSessionHost   uint32 = 0x2A
+	// GetDetailedParticipants(gid) -> List<ParticipantDetails>: the lobby screen's participant
+	// list. Left unanswered (NotImplemented), SMB35's post-matchmake lobby screen dies with
+	// 2306-0103 — the exact same "unanswered call -> 2306-0103" signature already measured for
+	// Splatoon 2's CloseParticipation below, so this generalizes across titles, not SMB35-specific.
+	MethodGetDetailedParticipants uint32 = 0x0F // 15
+	MethodFindBySingleID15        uint32 = 0x15
+	MethodUpdateSessionURL        uint32 = 0x1B
+	MethodUpdateSessionHostV1     uint32 = 0x28
+	MethodGetSessionURLs          uint32 = 0x29
+	MethodUpdateSessionHost       uint32 = 0x2A
 
 	// Splatfest TEAM battles combine two full 4-player teams by MIGRATING gathering ownership
 	// (kinnay MatchMaking 0x15: 43 UpdateGatheringOwnership, 44 MigrateGatheringOwnership, and
@@ -66,10 +72,17 @@ const (
 	MethodUpdateMatchmakeSessionPart     uint32 = 0x2C
 	MethodUpdateProgressScore            uint32 = 0x22
 	MethodFindMatchmakeSessionBySingleID uint32 = 0x31
-	MethodCustomPlayingSession           uint32 = 0x3C
-	MethodCustomFriendsQuery             uint32 = 0x41
-	MethodCustomPrivateRoomCreate        uint32 = 0x44
-	MethodCustomResolveCode              uint32 = 0x45
+	// FindMatchmakeSessionByGatheringIDDetail(gid u32) -> MatchmakeSession, unscrubbed
+	// (unlike FindMatchmakeSessionBySingleID, which strips the session key/password for
+	// an outside browse-style lookup — see findBySingleID below). Mario Tennis Aces calls
+	// this on its own just-created gathering right after ReplaceURL, presumably to read
+	// back its own fully-resolved session; left unanswered it's the same "generic
+	// NotImplemented -> 2306-0103" signature as everything else in this file.
+	MethodFindMatchmakeSessionByGatheringIDDetail uint32 = 0x29
+	MethodCustomPlayingSession                    uint32 = 0x3C
+	MethodCustomFriendsQuery                      uint32 = 0x41
+	MethodCustomPrivateRoomCreate                 uint32 = 0x44
+	MethodCustomResolveCode                       uint32 = 0x45
 
 	// SSBU (Super Smash Bros Ultimate) arena methods. MK8 never calls these, so
 	// registering them is harmless to MK8; they reuse the same in-memory store.
@@ -206,6 +219,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.resolveCode(conn, req)
 		case MethodFindByGidList:
 			return m.findByGidList(conn, req)
+		case MethodFindMatchmakeSessionByGatheringIDDetail:
+			return m.findByGatheringIDDetail(conn, req)
 		case MethodBrowseNoHolder:
 			return m.browseNoHolder(conn, req)
 		case MethodSSBUPreMatch:
@@ -262,10 +277,70 @@ func (m *Matchmaking) MatchMakingHandler() RMCHandler {
 			return m.updateGatheringOwnership(conn, req)
 		case MethodFindBySingleID15:
 			return m.findBySingleID15(conn, req)
+		case MethodGetDetailedParticipants:
+			return m.getDetailedParticipants(conn, req)
 		default:
 			return notImplemented(conn, ProtocolMatchMaking, req)
 		}
 	}
+}
+
+// ParticipantDetails is one entry of GetDetailedParticipants' response list.
+type ParticipantDetails struct {
+	PID          uint64
+	Name         string
+	Message      string
+	Participants uint16
+}
+
+// Levels implements Structure.
+func (p *ParticipantDetails) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.PID(p.PID)
+			o.String(p.Name)
+			o.String(p.Message)
+			o.U16(p.Participants)
+		},
+		Load: func(i *StreamIn) {
+			p.PID = i.PID()
+			p.Name = i.String()
+			p.Message = i.String()
+			p.Participants = i.U16()
+		},
+	}}
+}
+
+// getDetailedParticipants answers the lobby screen's participant list. No
+// per-participant join message is tracked today (see the gathering struct),
+// so Name is the pid's decimal string (matching every title's Name fallback
+// elsewhere in this file, e.g. dispName in each game server's dashboard) and
+// Message is always empty — both harmless, since no known title's client
+// requires more than a non-empty response here.
+func (m *Matchmaking) getDetailedParticipants(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	in := NewStreamIn(req.Body, s)
+	gid := in.U32()
+	if in.Err() != nil {
+		return NewRMCError(s, ProtocolMatchMaking, req.CallID, ResultCoreInvalidArgument)
+	}
+
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	var parts []uint64
+	if g != nil {
+		parts = append([]uint64(nil), g.participants...)
+	}
+	m.mu.Unlock()
+	if g == nil {
+		return NewRMCError(s, ProtocolMatchMaking, req.CallID, ResultRendezVousSessionVoid)
+	}
+
+	out := NewStreamOut(s)
+	WriteList(out, parts, func(o *StreamOut, pid uint64) {
+		o.Add(&ParticipantDetails{PID: pid, Name: strconv.FormatUint(pid, 10), Participants: 1})
+	})
+	return NewRMCSuccess(s, ProtocolMatchMaking, req.Method, req.CallID, out.Bytes())
 }
 
 // MatchMakingExtHandler handles MatchMakingExt (0x32).
@@ -698,6 +773,30 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 	if joined {
 		m.notifyParticipation(conn, parts, gid, "")
 	}
+	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+}
+
+// findByGatheringIDDetail answers FindMatchmakeSessionByGatheringIDDetail: the
+// full, unscrubbed session (unlike findBySingleID's browse-style lookup) —
+// for a caller reading back its own gathering's resolved state.
+func (m *Matchmaking) findByGatheringIDDetail(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	gid := NewStreamIn(req.Body, s).U32()
+
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	var result *MatchmakeSession
+	if g != nil {
+		r := *g.session
+		result = &r
+	}
+	m.mu.Unlock()
+
+	if result == nil {
+		return NewRMCError(s, ProtocolMatchmakeExtension, req.CallID, ResultRendezVousSessionVoid)
+	}
+	out := NewStreamOut(s)
+	out.Add(result)
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 

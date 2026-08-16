@@ -32,6 +32,26 @@ import (
 const (
 	ProtocolRanking        uint16 = 0x70
 	MethodUploadCommonData uint32 = 0x4
+	// MethodGetCommonData(unique_id u64) -> Buffer: a single player's own common
+	// data, looked up by "unique ID" — which in this core IS the PID (see
+	// utility.go's AcquireNexUniqueID: it hands out uint64(conn.PID) verbatim,
+	// not a separate id space), so this reuses the same PID-keyed store
+	// UploadCommonData/commonDataByPIDs already maintain. Mario Tennis Aces
+	// calls this immediately after Register, before ever uploading anything —
+	// left unanswered it's Core::NotImplemented -> the client's generic
+	// 2306-0103 "an error has occurred", same signature already measured for
+	// Splatoon 2's CloseParticipation above. An empty Buffer (no data on file
+	// yet) is Nintendo's own answer for an unknown id, per commonDataByPIDs'
+	// comment below — not a placeholder.
+	MethodGetCommonData uint32 = 0x6
+
+	// MethodUploadScore(RankingScoreData{category,score,order,update_mode,groups[],
+	// param}, unique_id u64) -> empty ack. The STANDARD kinnay/NintendoClients wire
+	// number (1) for score submission — distinct from methodRankingSubmitScore (0x11)
+	// below, which is MK8's own measured number for the same concept. Mario Tennis
+	// Aces uses 1: both players call it simultaneously right after a match, same
+	// "unanswered -> 2306-0103" signature as everywhere else in this file.
+	MethodUploadScore uint32 = 0x1
 
 	// methodRankingGetCompetitionInfo : liste des tournois. Sur la capture,
 	// Nintendo rend 85 tournois ; sans tournoi chez nous, une liste vide.
@@ -198,6 +218,10 @@ func RankingHandler() RMCHandler {
 		switch req.Method {
 		case MethodUploadCommonData:
 			return uploadCommonData(conn, req)
+		case MethodGetCommonData:
+			return getCommonData(conn, req)
+		case MethodUploadScore:
+			return uploadScore(conn, req)
 		case methodRankingCommonDataByPIDs:
 			return commonDataByPIDs(conn, req)
 		case methodRankingGetCompetitionInfo:
@@ -233,6 +257,40 @@ func uploadCommonData(conn *Connection, req *RMCMessage) *RMCMessage {
 		PutCommonData(conn.PID, blob)
 	}
 	return NewRMCSuccess(conn.Settings, ProtocolRanking, req.Method, req.CallID, nil)
+}
+
+// uploadScore answers the standard UploadScore(1): decode-and-keep, empty ack —
+// the wire shape kinnay/NintendoClients documents (RankingScoreData + unique_id),
+// distinct from methodRankingSubmitScore's MK8-measured raw-body storage below.
+func uploadScore(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	in := NewStreamIn(req.Body, s)
+	category := in.U32()
+	score := in.U32()
+	_ = in.U8()                                                 // order
+	_ = in.U8()                                                 // update_mode
+	_ = ReadList(in, func(i *StreamIn) uint8 { return i.U8() }) // groups
+	_ = in.U64()                                                // param
+	_ = in.U64()                                                // unique_id
+	if in.Err() != nil {
+		return NewRMCError(s, ProtocolRanking, req.CallID, ResultCoreInvalidArgument)
+	}
+	fmt.Printf("[Ranking] UploadScore pid=%d category=%d score=%d\n", conn.PID, category, score)
+	return NewRMCSuccess(s, ProtocolRanking, req.Method, req.CallID, nil)
+}
+
+// getCommonData answers GetCommonData(unique_id): the caller's own stored
+// common data, or an empty Buffer if nothing's been uploaded yet.
+func getCommonData(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	in := NewStreamIn(req.Body, s)
+	uniqueID := in.U64()
+	if in.Err() != nil {
+		return NewRMCError(s, ProtocolRanking, req.CallID, ResultCoreInvalidArgument)
+	}
+	out := NewStreamOut(s)
+	out.Buffer(CommonData(uniqueID))
+	return NewRMCSuccess(s, ProtocolRanking, req.Method, req.CallID, out.Bytes())
 }
 
 // commonDataByPIDs rend, pour chaque PID demandé et DANS L'ORDRE, le profil

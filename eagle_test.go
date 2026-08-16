@@ -161,9 +161,9 @@ func readyClient(t *testing.T, s *EagleServer, pid uint64) (*EagleClient, *fakeE
 	out.bits(uint64(eagleLoginRequest), 8)
 	out.bits(0, s.cfg.NodeBits)
 	out.bytealign()
-	out.bits(0, 7)   // phase 0
-	out.bit(true)    // last fragment (irrelevant for phase 0)
-	out.bits(0, 8)   // connection_check
+	out.bits(0, 7) // phase 0
+	out.bit(true)  // last fragment (irrelevant for phase 0)
+	out.bits(0, 8) // connection_check
 	out.bits(uint64(s.cfg.ProtocolVersion), 32)
 	out.bits(s.cfg.AppVersion, 64)
 	out.bits(uint64(s.cfg.DDLHash), 32)

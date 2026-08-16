@@ -296,10 +296,33 @@ func parseEagleToken(tokenB64 string, cfg EagleConfig, sessionID uint32) (string
 	return tok.Payload.UserID, true
 }
 
+// EagleHandoffText builds the JSON payload {"url":..., "token":...} for a
+// NotificationEvent.StrParam (event type 200000) that hands a joining
+// participant off to wsURL's Eagle relay for the given gathering (session) id.
+// Wire it into Matchmaking.OnParticipantJoined.
+//
+// This uses the plain StrParam field (StructureVersion 0 — the encoding
+// confirmed working against real hardware) rather than the NEX 4.0+ Map
+// extension kinnay/NintendoClients' notification.py documents for this event
+// (EagleHandoffMap below, kept for reference/future use): a live test against
+// a real SMB35 client showed the Map-encoded version never reaching the game
+// at all (no Eagle connection attempt, from either the server's or the
+// client's own log) — consistent with this package's existing note that the
+// Map variant is "rejected outright" by at least one other already-verified
+// title. Unverified either way pending another real-client test.
+func EagleHandoffText(cfg EagleConfig, wsURL string, sessionID uint32, pid uint64) string {
+	payload := struct {
+		URL   string `json:"url"`
+		Token string `json:"token"`
+	}{URL: wsURL, Token: SignEagleToken(cfg, sessionID, pid)}
+	b, _ := json.Marshal(payload)
+	return string(b)
+}
+
 // EagleHandoffMap builds the {"url", "token"} pair for a NotificationEvent.Map
 // (event type 200000) that hands a joining participant off to wsURL's Eagle
-// relay for the given gathering (session) id. Wire it into
-// Matchmaking.OnParticipantJoined.
+// relay for the given gathering (session) id. See EagleHandoffText's comment —
+// kept for reference, not currently used by main.go.
 func EagleHandoffMap(cfg EagleConfig, wsURL string, sessionID uint32, pid uint64) map[string]Variant {
 	return map[string]Variant{
 		"url":   {Type: VariantString, String: wsURL},
