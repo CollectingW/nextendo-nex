@@ -53,6 +53,18 @@ const (
 	// "unanswered -> 2306-0103" signature as everywhere else in this file.
 	MethodUploadScore uint32 = 0x1
 
+	// MethodGetRanking(mode u8, category u32, RankingOrderParam{order_calc,
+	// group_index, group_num, time_scope u8; offset u32; count u8}, unique_id u64,
+	// pid) -> RankingResult{data: List<RankingRankData>, total u32, since_time
+	// DateTime}. Real bug found via live testing 2026-08-16: Mario Tennis Aces
+	// calls this right after posting tournament entry data (DataStore
+	// PostMetaBinary); left unanswered it silently killed the client with no
+	// visible error for several reconnect attempts, matching the
+	// PostMetaBinary/2306-0116 investigation above. An empty result (no
+	// leaderboard data yet) is a valid, safe answer — same "empty is legitimate"
+	// pattern as methodRankingGetCompetitionInfo/methodRankingCompetitionRanking.
+	MethodGetRanking uint32 = 0x9
+
 	// methodRankingGetCompetitionInfo : liste des tournois. Sur la capture,
 	// Nintendo rend 85 tournois ; sans tournoi chez nous, une liste vide.
 	methodRankingGetCompetitionInfo uint32 = 0x12
@@ -222,6 +234,8 @@ func RankingHandler() RMCHandler {
 			return getCommonData(conn, req)
 		case MethodUploadScore:
 			return uploadScore(conn, req)
+		case MethodGetRanking:
+			return getRanking(conn, req)
 		case methodRankingCommonDataByPIDs:
 			return commonDataByPIDs(conn, req)
 		case methodRankingGetCompetitionInfo:
@@ -275,6 +289,20 @@ func uploadScore(conn *Connection, req *RMCMessage) *RMCMessage {
 	fmt.Printf("[Ranking] UploadScore pid=%d bodyLen=%d body=%x\n", conn.PID, len(req.Body), req.Body)
 	keepSubmittedScore(conn.PID, req.Method, req.Body)
 	return NewRMCSuccess(s, ProtocolRanking, req.Method, req.CallID, nil)
+}
+
+// getRanking answers GetRanking with an empty leaderboard — no scores tracked
+// yet (UploadScore just stores the raw submission, doesn't feed a ranking
+// table). Doesn't bother decoding the request: nothing in it changes an empty
+// answer, and every other method in this file that reaches this point already
+// tolerates a request it can't fully interpret.
+func getRanking(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	out := NewStreamOut(s)
+	out.U32(0)                          // data: List<RankingRankData>, empty
+	out.U32(0)                          // total
+	out.DateTime(NowDateTime().Value()) // since_time
+	return NewRMCSuccess(s, ProtocolRanking, req.Method, req.CallID, out.Bytes())
 }
 
 // getCommonData answers GetCommonData(unique_id): the caller's own stored
