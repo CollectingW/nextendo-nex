@@ -259,23 +259,21 @@ func uploadCommonData(conn *Connection, req *RMCMessage) *RMCMessage {
 	return NewRMCSuccess(conn.Settings, ProtocolRanking, req.Method, req.CallID, nil)
 }
 
-// uploadScore answers the standard UploadScore(1): decode-and-keep, empty ack —
-// the wire shape kinnay/NintendoClients documents (RankingScoreData + unique_id),
-// distinct from methodRankingSubmitScore's MK8-measured raw-body storage below.
+// uploadScore answers the standard UploadScore(1): keep-and-ack, unconditionally
+// — like methodRankingSubmitScore below, NOT a hard decode. A first attempt at
+// strictly parsing kinnay/NintendoClients' documented RankingScoreData{category,
+// score,order,update_mode,groups[],param}+unique_id shape hard-failed with
+// Core::InvalidArgument for a real Mario Tennis Aces client (live-tested
+// 2026-08-16): its actual body doesn't match that layout exactly (extra/missing
+// field, or a different groups/param encoding — not yet decoded). Nintendo's own
+// server doesn't echo anything back here either way, so there's nothing riding
+// on getting the exact fields right immediately — store the raw body now,
+// decode it properly once captured, same as methodRankingSubmitScore already
+// does for MK8.
 func uploadScore(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
-	in := NewStreamIn(req.Body, s)
-	category := in.U32()
-	score := in.U32()
-	_ = in.U8()                                                 // order
-	_ = in.U8()                                                 // update_mode
-	_ = ReadList(in, func(i *StreamIn) uint8 { return i.U8() }) // groups
-	_ = in.U64()                                                // param
-	_ = in.U64()                                                // unique_id
-	if in.Err() != nil {
-		return NewRMCError(s, ProtocolRanking, req.CallID, ResultCoreInvalidArgument)
-	}
-	fmt.Printf("[Ranking] UploadScore pid=%d category=%d score=%d\n", conn.PID, category, score)
+	fmt.Printf("[Ranking] UploadScore pid=%d bodyLen=%d body=%x\n", conn.PID, len(req.Body), req.Body)
+	keepSubmittedScore(conn.PID, req.Method, req.Body)
 	return NewRMCSuccess(s, ProtocolRanking, req.Method, req.CallID, nil)
 }
 
